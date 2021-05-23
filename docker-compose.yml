@@ -1,0 +1,184 @@
+version: '2'
+
+services:
+  rocketchat:
+    container_name: rocketchat
+    image: rocketchat/rocket.chat:latest
+    command: >
+      bash -c
+        "for i in `seq 1 30`; do
+          node main.js &&
+          s=$$? && break || s=$$?;
+          echo \"Tried $$i times. Waiting 5 secs...\";
+          sleep 5;
+        done; (exit $$s)"
+    restart: unless-stopped
+    volumes:
+      - ./uploads:/app/uploads
+    environment:
+      - PORT=3000
+      - ROOT_URL=http://localhost:3000
+      - MONGO_URL=mongodb://mongo:27017/rocketchat
+      - MONGO_OPLOG_URL=mongodb://mongo:27017/local
+      - MAIL_URL=smtp://smtp.email
+#       - HTTP_PROXY=http://proxy.domain.com
+#       - HTTPS_PROXY=http://proxy.domain.com
+    depends_on:
+      - mongo
+    ports:
+      - 3000:3000
+    labels:
+      - "traefik.backend=rocketchat"
+      - "traefik.frontend.rule=Host: your.domain.tld"
+
+  mongo:
+    container_name: mongo
+    image: mongo:4.0
+    restart: unless-stopped
+    volumes:
+     - ./data/db:/data/db
+     #- ./data/dump:/dump
+    command: mongod --smallfiles --oplogSize 18 --replSet rs0 --storageEngine=mmapv1
+    labels:
+      - "traefik.enable=false"
+
+  # this container's job is just run the command to initialize the replica set.
+  # it will run the command and remove himself (it will not stay running)
+  mongo-init-replica:
+    container_name: mongo-init-replica
+    image: mongo:4.0
+    command: >
+      bash -c
+        "for i in `seq 1 30`; do
+          mongo mongo/rocketchat --eval \"
+            rs.initiate({
+              _id: 'rs0',
+              members: [ { _id: 0, host: 'localhost:27017' } ]})\" &&
+          s=$$? && break || s=$$?;
+          echo \"Tried $$i times. Waiting 5 secs...\";
+          sleep 5;
+        done; (exit $$s)"
+    depends_on:
+      - mongo
+
+  # hubot, the popular chatbot (add the bot user first and change the password before starting this image)
+  hubot:
+    container_name: hubot
+    image: rocketchat/hubot-rocketchat:latest
+    restart: unless-stopped
+    environment:
+      - ROCKETCHAT_URL=rocketchat:3000
+      - ROCKETCHAT_ROOM=GENERAL
+      - ROCKETCHAT_USER=bot
+      - ROCKETCHAT_PASSWORD=AAA123123aaa
+      - BOT_NAME=bot
+  # you can add more scripts as you'd like here, they need to be installable by npm
+      - EXTERNAL_SCRIPTS=hubot-help,hubot-seen,hubot-links,hubot-diagnostics
+    depends_on:
+      - rocketchat
+    labels:
+      - "traefik.enable=false"
+    volumes:
+      - ./hubot-rocketchat-boilerplate/scripts:/home/hubot/scripts
+  # this is used to expose the hubot port for notifications on the host on port 3001, e.g. for hubot-jenkins-notifier
+    ports:
+      - 3001:8080
+
+  #traefik:
+  #  image: traefik:latest
+  #  restart: unless-stopped
+  #  command: >
+  #    traefik
+  #     --docker
+  #     --acme=true
+  #     --acme.domains='your.domain.tld'
+  #     --acme.email='your@email.tld'
+  #     --acme.entrypoint=https
+  #     --acme.storagefile=acme.json
+  #     --defaultentrypoints=http
+  #     --defaultentrypoints=https
+  #     --entryPoints='Name:http Address::80 Redirect.EntryPoint:https'
+  #     --entryPoints='Name:https Address::443 TLS.Certificates:'
+  #  ports:
+  #    - 80:80
+  #    - 443:443
+  #  volumes:
+  #    - /var/run/docker.sock:/var/run/docker.sock
+  nextcloud-server:
+    container_name: nextcloud-server
+    image: nextcloud:fpm
+    restart: always
+    stdin_open: true
+    tty: true
+    networks:
+      - nextcloud
+    links:
+      - mariadb
+    expose:
+      - '80'
+      - '9000'
+    environment:
+      - NEXTCLOUD_TRUSTED_DOMAINS=*
+      - NEXTCLOUD_ADMIN_USER=zzz
+      - NEXTCLOUD_ADMIN_PASSWORD=AAA123123aaa
+      - MYSQL_ROOT_PASSWORD=nextcloud@AAA123123aaa
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloudroot
+      - MYSQL_PASSWORD=nextcloudroot@AAA123123aaa
+      - MYSQL_HOST=mariadb
+    volumes:
+      - nextcloud_data:/var/www/html:rw
+  onlyoffice-document-server:
+    container_name: onlyoffice-document-server
+    image: onlyoffice/documentserver:latest
+    restart: always
+    stdin_open: true
+    tty: true
+    networks:
+      - nextcloud
+    expose:
+      - '80'
+      - '443'
+    volumes:
+      - document_data:/var/www/onlyoffice/Data:rw
+      - document_log:/var/log/onlyoffice:rw
+  mariadb:
+    container_name: mariadb
+    image: mariadb:10.2
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    stdin_open: true
+    tty: true
+    networks:
+      - nextcloud
+    ports:
+      - 3306:3306
+    volumes:
+      - ./mariadb_data:/var/lib/mysql
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=nextcloud@AAA123123aaa
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloudroot
+      - MYSQL_PASSWORD=nextcloudroot@AAA123123aaa
+  nginx:
+    container_name: nginx-server
+    image: nginx
+    restart: always
+    stdin_open: true
+    tty: true
+    networks:
+      - nextcloud
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    volumes_from:
+      - nextcloud-server
+networks:
+  nextcloud:
+    driver: 'bridge'
+volumes:
+  document_data:
+  document_log:
+  nextcloud_data:
